@@ -12,6 +12,7 @@ mod cli;
 mod config;
 mod paths;
 mod purge;
+mod scan;
 mod shim;
 mod size;
 mod store;

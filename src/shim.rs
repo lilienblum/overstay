@@ -2,7 +2,75 @@
 //! workspace usage, and hands throttled cleanup to a detached child.
 
 use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+/// Where a shell's `cargo` actually lands.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ShimStatus {
+    /// `cargo` on PATH resolves to this same binary, through the shim symlink.
+    Active,
+    /// Some other `cargo` comes first on PATH, so the shim never runs.
+    Shadowed(PathBuf),
+    NoCargo,
+}
+
+/// Resolves `cargo` the way a shell would, then asks whether that is us.
+/// Comparison is by canonical path, which is what makes the symlink install
+/// verifiable: `~/.cargo-overstay/bin/cargo` and the `cargo-overstay` binary
+/// canonicalize to the same file, while a real cargo never does.
+pub(crate) fn shim_status(path_var: &OsStr, self_exe: &Path) -> ShimStatus {
+    let Some(found) = crate::cargo::which("cargo", path_var, None) else {
+        return ShimStatus::NoCargo;
+    };
+    let same = std::fs::canonicalize(&found)
+        .ok()
+        .zip(std::fs::canonicalize(self_exe).ok())
+        .is_some_and(|(found, own)| found == own);
+    if same {
+        ShimStatus::Active
+    } else {
+        ShimStatus::Shadowed(found)
+    }
+}
+
+/// Overstay only ever records builds the shim intercepts. When `cargo`
+/// resolves elsewhere, every build is invisible and `ls`/`purge` show a
+/// misleadingly short list that reads as "nothing to clean" rather than
+/// "nothing was watched". Say so.
+///
+/// Goes to stderr so it cannot corrupt piped `ls` output, and never changes
+/// an exit code: the command's own work still ran correctly.
+pub(crate) fn warn_if_inactive() {
+    let Ok(self_exe) = std::env::current_exe() else {
+        return;
+    };
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let style = crate::style::Style::stderr();
+    match shim_status(&path_var, &self_exe) {
+        ShimStatus::Active => {}
+        ShimStatus::Shadowed(found) => {
+            eprintln!(
+                "{} the cargo shim is not active — `cargo` resolves to {}",
+                style.warning("cargo-overstay:"),
+                style.path(found.display())
+            );
+            eprintln!(
+                "{}",
+                style.muted(
+                    "  Builds through it are never tracked. Put the shim's directory \
+                     ahead of that one on PATH."
+                )
+            );
+        }
+        ShimStatus::NoCargo => {
+            eprintln!(
+                "{} no `cargo` found on PATH — builds cannot be tracked",
+                style.warning("cargo-overstay:")
+            );
+        }
+    }
+}
 
 /// Hidden internal verb used to run the throttled post-build cleanup in a
 /// detached child process, off the critical path of a normal `cargo` command.
@@ -146,6 +214,61 @@ pub(crate) fn run_detached_gc(target_arg: Option<&OsStr>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dir holding an executable stand-in for the overstay binary.
+    fn shim_fixture(tag: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("overstay_shim_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shimbin")).unwrap();
+        std::fs::create_dir_all(dir.join("realbin")).unwrap();
+        let exe = dir.join("cargo-overstay");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let real = dir.join("realbin/cargo");
+        std::fs::write(&real, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&exe, dir.join("shimbin/cargo")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn shim_symlink_first_on_path_reads_as_active() {
+        let dir = shim_fixture("active");
+        let path = std::env::join_paths([dir.join("shimbin"), dir.join("realbin")]).unwrap();
+
+        assert_eq!(
+            shim_status(&path, &dir.join("cargo-overstay")),
+            ShimStatus::Active
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_real_cargo_earlier_on_path_reads_as_shadowed() {
+        // The exact failure this warning exists for: the shim is installed
+        // and on PATH, just not first.
+        let dir = shim_fixture("shadowed");
+        let path = std::env::join_paths([dir.join("realbin"), dir.join("shimbin")]).unwrap();
+
+        assert_eq!(
+            shim_status(&path, &dir.join("cargo-overstay")),
+            ShimStatus::Shadowed(dir.join("realbin/cargo"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn no_cargo_anywhere_on_path_is_its_own_status() {
+        let dir = shim_fixture("nocargo");
+        let path = std::env::join_paths([dir.join("empty")]).unwrap();
+
+        assert_eq!(
+            shim_status(&path, &dir.join("cargo-overstay")),
+            ShimStatus::NoCargo
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn run_detached_gc_is_best_effort_and_returns_zero() {

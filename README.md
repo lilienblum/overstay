@@ -15,16 +15,41 @@ cargo install cargo-overstay
 
 ```sh
 cargo overstay purge                              # reclaim tracked targets
-cargo overstay purge --include-untracked          # also scan under your home
+cargo overstay purge --include-untracked          # also scan home and temp
 cargo overstay purge --include-untracked ~/work   # scan a narrower location
 cargo overstay ls                                 # show tracked projects
+cargo overstay ls --include-untracked             # also list what is untracked
+cargo overstay ls --include-untracked ~/work      # scan a narrower location
 ```
 
-By default, `purge` only considers targets recorded by the cargo shim. Pass
-`--include-untracked` to also discover Cargo targets under a directory.
+By default, both commands only consider targets recorded by the cargo shim.
+Pass `--include-untracked` to also discover Cargo targets on disk — `ls`
+reports exactly what `purge` would act on, so you can look before you delete.
+Untracked sizes are listed separately and are not counted against the budget.
+
+With no directory given, the scan covers your home directory **and the system
+temp directories** (`/tmp` and `$TMPDIR`). Temp matters because agent tooling
+puts git worktrees there, each with a full `target/` — builds that never feel
+like they live on your disk, and often the largest thing a home-only scan
+misses.
+
+A scan stays on its root's filesystem. A mount underneath it — an OrbStack or
+Docker VM export, a file server, an external disk — belongs to somewhere else,
+where walking is slow enough to stall on a timeout and deleting a `target/`
+would reclaim space on a machine you never named. Pointing the scan at such a
+mount deliberately still works, since the root sets the boundary.
+
 `purge` validates targets before deleting them, asks before removing ambiguous
-matches, and skips active builds. It never follows symlinks or touches a
-scanned `target/` without a sibling `Cargo.toml`.
+matches, and skips active builds. It never follows symlinks and never descends
+into a `target/`. A scanned `target/` is deleted outright only when both a
+sibling `Cargo.toml` and cargo's own markers vouch for it. With just one of the
+two — a manifest whose target was never built, or cargo markers with no
+manifest beside them, as in a git worktree — it is listed as `(unverified)` and
+gated behind a confirmation. A `target/` with neither signal (someone's JS
+build output, say) is never listed and never touched.
+
+`ls` shows `missing` for a recorded target that is no longer on disk; `purge`
+prunes those rows.
 
 Output is colored when connected to a terminal and stays plain when piped or
 redirected. Set [`NO_COLOR`](https://no-color.org/) to disable colors.
@@ -64,6 +89,46 @@ Check that it is active:
 command -v cargo
 # ~/.cargo-overstay/bin/cargo
 ```
+
+If that prints anything else, the shim is installed but shadowed, and nothing
+you build is recorded. `ls` and `purge` warn when this is the case.
+
+Check which build you are actually running:
+
+```sh
+cargo overstay --version
+# cargo-overstay 0.3.0
+```
+
+Worth comparing against `cargo install` after an upgrade. The shim is a symlink
+to the installed binary, so a stale install is a stale shim — and it fails
+quietly rather than loudly.
+
+### Watch out for version managers
+
+A tool that manages your Rust toolchain — mise, asdf, rtx — prepends its own
+cargo to `PATH` when it activates, which is usually *after* the line above ran.
+mise in particular symlinks its rust install directly at `~/.cargo/bin`, so
+activating it puts the real cargo in front of the shim. Both directories are on
+`PATH`; only the order is wrong, which is why this fails silently.
+
+Re-prepend the shim *after* the activation line rather than before it:
+
+```sh
+# ~/.zshrc, below `eval "$(mise activate zsh)"`
+typeset -U path
+path=("$HOME/.cargo-overstay/bin" $path)
+```
+
+```fish
+# ~/.config/fish/config.fish, below `mise activate fish | source`
+fish_add_path --path --move --prepend $HOME/.cargo-overstay/bin
+```
+
+Note that `~/.zshrc` only runs for *interactive* zsh shells, so a setup that
+works in your terminal can still be bypassed by non-interactive shells (and
+vice versa). `command -v cargo` inside the shell you actually build from is the
+check that matters.
 
 ## Configure size limits
 
