@@ -88,8 +88,8 @@ mod tests {
         let style = Style { enabled: true };
 
         assert_eq!(
-            style.heading("Tracked targets"),
-            "\x1b[1;4mTracked targets\x1b[0m"
+            style.heading("Heading"),
+            "\x1b[1;4mHeading\x1b[0m"
         );
         assert_eq!(style.path("/work/app"), "\x1b[4;36m/work/app\x1b[0m");
         assert_eq!(style.error("75 GiB"), "\x1b[1;31m75 GiB\x1b[0m");
@@ -99,7 +99,7 @@ mod tests {
     fn disabled_style_leaves_text_unchanged() {
         let style = Style { enabled: false };
 
-        assert_eq!(style.heading("Tracked targets"), "Tracked targets");
+        assert_eq!(style.heading("Heading"), "Heading");
         assert_eq!(style.muted("2d ago"), "2d ago");
     }
 

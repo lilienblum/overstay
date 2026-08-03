@@ -101,7 +101,7 @@ fn ls(args: &[OsString]) -> i32 {
             style.muted("No tracked projects yet — build something through cargo first.")
         );
     } else {
-        println!("{}", style.heading("Tracked targets"));
+        println!();
     }
     for e in &rows {
         let target = Path::new(&e.target_dir);
